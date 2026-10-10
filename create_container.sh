@@ -61,6 +61,7 @@ set -euo pipefail
 USER_HOME="/home/s00988495"
 PROXY_FILE="${USER_HOME}/proxy.sh"
 SCRIPT_PATH="${USER_HOME}/create-container.sh"
+PROXY_IP="${PROXY_IP:-141.2.191.233}"
 
 
 # =============================================================================
@@ -461,7 +462,7 @@ if [[ ! -f "$PROXY_FILE" ]]; then
     cat > "$PROXY_FILE" <<'EOF'
 #!/usr/bin/env bash
 
-export ip_addr=141.2.250.30
+export ip_addr=141.2.191.233
 
 export http_proxy="http://p_atlas:proxy%40123@$ip_addr:8080"
 export https_proxy="$http_proxy"
@@ -484,6 +485,32 @@ else
     echo "[INFO] Skip creation."
 
 fi
+
+
+# =============================================================================
+# 3.1 同步当前代理 IP
+# =============================================================================
+#
+# proxy.sh 已存在时也必须更新，因为代理机器重启后 IP 可能变化。
+# 默认使用 141.2.191.233，也可以在执行脚本时通过 PROXY_IP 覆盖：
+#
+#   PROXY_IP=141.2.x.x bash create_container.sh ...
+#
+# =============================================================================
+
+if [[ ! "$PROXY_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "[ERROR] Invalid PROXY_IP: $PROXY_IP" >&2
+    exit 2
+fi
+
+if grep -qE '^export ip_addr=' "$PROXY_FILE"; then
+    sed -i "s/^export ip_addr=.*/export ip_addr=${PROXY_IP}/" "$PROXY_FILE"
+else
+    printf '\nexport ip_addr=%s\n' "$PROXY_IP" >> "$PROXY_FILE"
+fi
+
+chmod 600 "$PROXY_FILE"
+echo "[INFO] Proxy IP synchronized: ip_addr=$PROXY_IP"
 
 
 # =============================================================================

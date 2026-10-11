@@ -40,6 +40,9 @@
 #   5. 配置 /root/.bashrc
 #   6. 设置 alias:
 #        glog='git log --oneline -5'
+#        plog='cd ~/ascend/log/debug/plog'
+#        plogls='ls -lht ~/ascend/log/debug/plog | head -30'
+#        plogerr='grep -iE "ERROR|kernel|kernel_name|operator|\bOOM\b|hccl"'
 #   7. 自动 cd /home/s00988495
 #   8. 进入交互式 bash
 #
@@ -198,6 +201,15 @@ export GIT_SSL_NO_VERIFY=1
 
 alias glog='git log --oneline -5'
 
+# ============================================================================
+# Ascend plog（算子 / HCCL 底层报错日志）
+#   日志目录: ~/ascend/log/debug/plog
+# ============================================================================
+
+alias plog='cd ~/ascend/log/debug/plog'
+alias plogls='ls -lht ~/ascend/log/debug/plog | head -30'
+alias plogerr='grep -iE "ERROR|kernel|kernel_name|operator|\bOOM\b|hccl"'
+
 
 # ============================================================================
 # Default working directory
@@ -218,6 +230,11 @@ EOF
     # =========================================================================
 
     alias glog='git log --oneline -5'
+
+    # Ascend plog（算子 / HCCL 底层报错日志）: ~/ascend/log/debug/plog
+    alias plog='cd ~/ascend/log/debug/plog'
+    alias plogls='ls -lht ~/ascend/log/debug/plog | head -30'
+    alias plogerr='grep -iE "ERROR|kernel|kernel_name|operator|\bOOM\b|hccl"'
 
     export GIT_SSL_NO_VERIFY=1
 
@@ -268,6 +285,13 @@ EOF
     echo
     echo "Git alias:"
     echo "  glog='git log --oneline -5'"
+
+    echo
+    echo "Ascend plog aliases（算子 / HCCL 底层报错日志）:"
+    echo "  日志目录: ~/ascend/log/debug/plog"
+    echo "  plog='cd ~/ascend/log/debug/plog'"
+    echo "  plogls='ls -lht ~/ascend/log/debug/plog | head -30'"
+    echo "  plogerr='grep -iE \"ERROR|kernel|kernel_name|operator|\bOOM\b|hccl\"'"
 
     echo
     echo "Current directory:"

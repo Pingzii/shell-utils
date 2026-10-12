@@ -96,6 +96,54 @@
 
 set -euo pipefail
 
+# =============================================================================
+# Runtime environment
+#
+# 默认 OpenSSL 目录可覆盖：
+#   OPENSSL35_PATH=/path/to/openssl/lib bash afd_build_and_compile.sh --force
+# 保留 CANN / torch_npu 库路径，仅移除指定 OpenSSL 目录。
+# 每次调用单独切换环境，覆盖 clone、stamp、构建后的 Git 检查及 Python 检查。
+# =============================================================================
+
+OPENSSL35_PATH="${OPENSSL35_PATH:-/home/miniconda3/pkgs/openssl-3.5.7-h39c9139_0/lib}"
+OPENSSL35_PATH="${OPENSSL35_PATH%/}"
+
+SYSTEM_ENV_LD_LIBRARY_PATH=""
+IFS=: read -r -a runtime_library_dirs <<< "${LD_LIBRARY_PATH:-}"
+for runtime_library_dir in "${runtime_library_dirs[@]}"; do
+    if [[ -n "$runtime_library_dir" && "${runtime_library_dir%/}" != "$OPENSSL35_PATH" ]]; then
+        SYSTEM_ENV_LD_LIBRARY_PATH+="${SYSTEM_ENV_LD_LIBRARY_PATH:+:}${runtime_library_dir}"
+    fi
+done
+unset runtime_library_dir runtime_library_dirs
+
+use_system_env()
+{
+    if [[ -n "$SYSTEM_ENV_LD_LIBRARY_PATH" ]]; then
+        export LD_LIBRARY_PATH="$SYSTEM_ENV_LD_LIBRARY_PATH"
+    else
+        unset LD_LIBRARY_PATH
+    fi
+}
+
+use_python_env()
+{
+    export LD_LIBRARY_PATH="${OPENSSL35_PATH}${SYSTEM_ENV_LD_LIBRARY_PATH:+:${SYSTEM_ENV_LD_LIBRARY_PATH}}"
+}
+
+# 子 shell 保证每个命令返回后，调用方环境保持原样。
+git()
+(
+    use_system_env
+    command git "$@"
+)
+
+python3()
+(
+    use_python_env
+    command python3 "$@"
+)
+
 
 # =============================================================================
 # 0. 参数
@@ -336,17 +384,38 @@ else
 fi
 
 
-if ! command -v git >/dev/null 2>&1; then
+if ! type -P git >/dev/null 2>&1; then
     echo "[ERROR] git not found."
     exit 1
 fi
 
 
-if ! command -v python3 >/dev/null 2>&1; then
+if ! type -P python3 >/dev/null 2>&1; then
     echo "[ERROR] python3 not found."
     exit 1
 fi
 
+
+echo "[env] Git/system LD_LIBRARY_PATH=${SYSTEM_ENV_LD_LIBRARY_PATH:-<unset>}"
+echo "[env] Python OpenSSL library directory=$OPENSSL35_PATH"
+
+if [[ ! -d "$OPENSSL35_PATH" ]]; then
+    echo "[ERROR] OpenSSL library directory not found: $OPENSSL35_PATH"
+    echo "[ERROR] Set OPENSSL35_PATH to the installed OpenSSL 3.5 library directory."
+    exit 1
+fi
+
+if ! python3 - <<'PY'
+import ssl
+
+print("[env] Python OpenSSL:", ssl.OPENSSL_VERSION)
+if ssl.OPENSSL_VERSION_INFO[:2] != (3, 5):
+    raise RuntimeError("Python must load OpenSSL 3.5; check OPENSSL35_PATH")
+PY
+then
+    echo "[ERROR] Python SSL check failed; stopping before clone/build."
+    exit 1
+fi
 
 echo "[env] Python:"
 python3 --version

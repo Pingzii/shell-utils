@@ -1305,17 +1305,13 @@ unset LD_PRELOAD || true
 
 if need_build \
     "$VLLM_ASCEND_DIR" \
-    "$VLLM_ASCEND_STAMP" \
-    || [[ ! -f "$VLLM_ASCEND_DIR/vllm_ascend/_build_info.py" ]]; then
+    "$VLLM_ASCEND_STAMP"; then
 
 
     echo
     echo "[vllm-ascend] Building..."
     echo "[vllm-ascend] commit=$VLLM_ASCEND_COMMIT"
     echo "[vllm-ascend] SOC_VERSION=$SOC_VERSION"
-    if [[ ! -f "$VLLM_ASCEND_DIR/vllm_ascend/_build_info.py" ]]; then
-        echo "[vllm-ascend] _build_info.py missing; build required even if a stamp exists."
-    fi
     echo
 
 
@@ -1323,6 +1319,11 @@ if need_build \
     python3 -m pip install \
         -e . \
         --no-build-isolation
+
+
+    write_stamp \
+        "$VLLM_ASCEND_DIR" \
+        "$VLLM_ASCEND_STAMP"
 
 
 else
@@ -1340,21 +1341,14 @@ fi
 
 python3 - <<'PY'
 import vllm_ascend
-from vllm_ascend import _build_info
 
 print("[vllm-ascend] import OK")
-print("[vllm-ascend] build info =", _build_info.__file__)
 
 print(
     "[vllm-ascend] version =",
     getattr(vllm_ascend, "__version__", "unknown")
 )
 PY
-
-# 只有构建信息验证成功才记录 stamp；完整平台导入保留在最终验证阶段。
-write_stamp \
-    "$VLLM_ASCEND_DIR" \
-    "$VLLM_ASCEND_STAMP"
 
 
 # =============================================================================

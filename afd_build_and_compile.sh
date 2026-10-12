@@ -101,43 +101,60 @@ set -euo pipefail
 #
 # 默认 OpenSSL 目录可覆盖：
 #   OPENSSL35_PATH=/path/to/openssl/lib bash afd_build_and_compile.sh --force
-# 保留 CANN / torch_npu 库路径，仅移除指定 OpenSSL 目录。
-# 每次调用单独切换环境，覆盖 clone、stamp、构建后的 Git 检查及 Python 检查。
+# Python 保留 CANN / torch_npu 库路径并优先加载指定 OpenSSL。
+# Git 使用系统库；临时 PATH 入口也覆盖 pip / CMake / Bash 内部启动的 Git。
+# 不修改系统库、全局 shell 配置或上游源码。
 # =============================================================================
 
 OPENSSL35_PATH="${OPENSSL35_PATH:-/home/miniconda3/pkgs/openssl-3.5.7-h39c9139_0/lib}"
 OPENSSL35_PATH="${OPENSSL35_PATH%/}"
 
-SYSTEM_ENV_LD_LIBRARY_PATH=""
+PYTHON_BASE_LD_LIBRARY_PATH=""
 IFS=: read -r -a runtime_library_dirs <<< "${LD_LIBRARY_PATH:-}"
 for runtime_library_dir in "${runtime_library_dirs[@]}"; do
     if [[ -n "$runtime_library_dir" && "${runtime_library_dir%/}" != "$OPENSSL35_PATH" ]]; then
-        SYSTEM_ENV_LD_LIBRARY_PATH+="${SYSTEM_ENV_LD_LIBRARY_PATH:+:}${runtime_library_dir}"
+        PYTHON_BASE_LD_LIBRARY_PATH+="${PYTHON_BASE_LD_LIBRARY_PATH:+:}${runtime_library_dir}"
     fi
 done
 unset runtime_library_dir runtime_library_dirs
 
-use_system_env()
+init_git_env()
 {
-    if [[ -n "$SYSTEM_ENV_LD_LIBRARY_PATH" ]]; then
-        export LD_LIBRARY_PATH="$SYSTEM_ENV_LD_LIBRARY_PATH"
-    else
-        unset LD_LIBRARY_PATH
+    # 不使用可能指向 conda 的 Git；非标准系统路径可通过环境变量覆盖。
+    export AFD_REAL_GIT="${SYSTEM_GIT_BIN:-/usr/bin/git}"
+    if [[ "$AFD_REAL_GIT" != /* || ! -x "$AFD_REAL_GIT" ]]; then
+        echo "[ERROR] System Git not executable: $AFD_REAL_GIT"
+        echo "[ERROR] Set SYSTEM_GIT_BIN to the absolute system Git executable path."
+        return 1
     fi
+
+    AFD_GIT_ENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/afd-git-env.XXXXXXXX")"
+    trap cleanup_git_env EXIT
+    cat > "$AFD_GIT_ENV_DIR/git" <<'SH'
+#!/bin/bash
+set -euo pipefail
+# Git 及 git-remote-https 等子进程使用同一套系统动态库。
+unset LD_LIBRARY_PATH LD_PRELOAD
+exec "$AFD_REAL_GIT" "$@"
+SH
+    chmod 700 "$AFD_GIT_ENV_DIR/git"
+    export PATH="$AFD_GIT_ENV_DIR:$PATH"
+    hash -r
+}
+
+cleanup_git_env()
+{
+    # 仅删除本次 mktemp 创建的入口文件及空目录，不递归删除。
+    rm -f -- "$AFD_GIT_ENV_DIR/git" || true
+    rmdir -- "$AFD_GIT_ENV_DIR" || true
 }
 
 use_python_env()
 {
-    export LD_LIBRARY_PATH="${OPENSSL35_PATH}${SYSTEM_ENV_LD_LIBRARY_PATH:+:${SYSTEM_ENV_LD_LIBRARY_PATH}}"
+    export LD_LIBRARY_PATH="${OPENSSL35_PATH}${PYTHON_BASE_LD_LIBRARY_PATH:+:${PYTHON_BASE_LD_LIBRARY_PATH}}"
 }
 
-# 子 shell 保证每个命令返回后，调用方环境保持原样。
-git()
-(
-    use_system_env
-    command git "$@"
-)
-
+# 子 shell 保证 Python 命令返回后，调用方的库路径保持原样。
 python3()
 (
     use_python_env
@@ -396,7 +413,8 @@ if ! type -P python3 >/dev/null 2>&1; then
 fi
 
 
-echo "[env] Git/system LD_LIBRARY_PATH=${SYSTEM_ENV_LD_LIBRARY_PATH:-<unset>}"
+init_git_env
+echo "[env] System Git=$AFD_REAL_GIT (LD_LIBRARY_PATH / LD_PRELOAD unset, including build subprocesses)"
 echo "[env] Python OpenSSL library directory=$OPENSSL35_PATH"
 
 if [[ ! -d "$OPENSSL35_PATH" ]]; then
@@ -407,13 +425,17 @@ fi
 
 if ! python3 - <<'PY'
 import ssl
+import subprocess
 
 print("[env] Python OpenSSL:", ssl.OPENSSL_VERSION)
 if ssl.OPENSSL_VERSION_INFO[:2] != (3, 5):
     raise RuntimeError("Python must load OpenSSL 3.5; check OPENSSL35_PATH")
+# 直接从 Python 启动 Git，验证构建子进程也能使用临时入口。
+git_version = subprocess.check_output(["git", "--version"], text=True).strip()
+print("[env] Git from Python:", git_version)
 PY
 then
-    echo "[ERROR] Python SSL check failed; stopping before clone/build."
+    echo "[ERROR] Python SSL / child Git check failed; stopping before clone/build."
     exit 1
 fi
 

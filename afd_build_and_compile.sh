@@ -29,10 +29,10 @@
 #       https://github.com/vllm-project/vllm.git
 #
 #     ref:
-#       v0.26.0
+#       v0.30.0 (commit ced6857a)
 #
 #     特殊处理：
-#       只获取 v0.26.0
+#       只获取 v0.30.0
 #       depth = 1
 #
 #
@@ -41,11 +41,11 @@
 #       https://github.com/vllm-project/vllm-ascend.git
 #
 #     commit:
-#       80d8c194f
+#       8d4409d6
 #
 #     处理：
 #       正常 git clone 整个仓库
-#       checkout 80d8c194f
+#       checkout 8d4409d6
 #
 #
 #   afd-plugin
@@ -58,6 +58,8 @@
 #     处理：
 #       正常 git clone 整个仓库
 #       checkout main
+#       通过 vllm.general_plugins entry point 安装 AFD
+#       不修改 vLLM / vLLM-Ascend 源码树
 #
 #
 # 编译顺序：
@@ -239,12 +241,14 @@ STAMP_DIR="${ROOT}/.build_stamps"
 # -----------------------------------------------------------------------------
 # vLLM
 #
-# 只获取 v0.26.0，depth=1。
+# 只获取 v0.30.0，depth=1，并校验目标 commit。
 # -----------------------------------------------------------------------------
 
 VLLM_URL="https://github.com/vllm-project/vllm.git"
 
-VLLM_REF="v0.26.0"
+VLLM_REF="v0.30.0"
+
+VLLM_COMMIT="ced6857afa0ea7b2e3f0846a62e1394e90f15607"
 
 
 # -----------------------------------------------------------------------------
@@ -255,7 +259,7 @@ VLLM_REF="v0.26.0"
 
 VLLM_ASCEND_URL="https://github.com/vllm-project/vllm-ascend.git"
 
-VLLM_ASCEND_COMMIT="80d8c194f"
+VLLM_ASCEND_COMMIT="8d4409d6256d8a6729140ddcc0d1889e3f96cdd6"
 
 
 # -----------------------------------------------------------------------------
@@ -447,7 +451,7 @@ echo "[env] SOC_VERSION=$SOC_VERSION"
 #
 #   只获取：
 #
-#       v0.26.0
+#       v0.30.0
 #
 #   depth：
 #
@@ -457,14 +461,14 @@ echo "[env] SOC_VERSION=$SOC_VERSION"
 # 实际命令：
 #
 #   git clone
-#       --branch v0.26.0
+#       --branch v0.30.0
 #       --single-branch
 #       --depth 1
 #
 #
 # 注意：
 #
-# v0.26.0 是 tag，
+# v0.30.0 是 tag，
 # 但 git clone --branch 同样支持指定 tag。
 #
 # =============================================================================
@@ -561,6 +565,18 @@ clone_vllm()
         "$VLLM_REF"
 
 
+    local actual_head
+
+    actual_head="$(git -C "$dir" rev-parse HEAD)"
+
+    if [[ "$actual_head" != "$VLLM_COMMIT" ]]; then
+        echo "[ERROR] vLLM HEAD mismatch."
+        echo "        expected: $VLLM_COMMIT"
+        echo "        actual  : $actual_head"
+        exit 1
+    fi
+
+
     echo
     echo "[git] vLLM HEAD:"
 
@@ -597,7 +613,7 @@ clone_vllm()
 #
 # clone 完以后：
 #
-#   checkout --detach 80d8c194f
+#   checkout --detach 8d4409d6
 #
 # =============================================================================
 
@@ -698,12 +714,12 @@ clone_vllm_ascend()
 
         echo
         echo "[git] Commit not available locally."
-        echo "[git] Fetching all remote refs..."
+        echo "[git] Fetching the exact vLLM-Ascend commit..."
 
 
         git -C "$dir" fetch \
             origin \
-            --tags
+            "$VLLM_ASCEND_COMMIT"
 
 
         if ! git -C "$dir" cat-file \
@@ -733,6 +749,18 @@ clone_vllm_ascend()
     git -C "$dir" checkout \
         --detach \
         "$VLLM_ASCEND_COMMIT"
+
+
+    local actual_head
+
+    actual_head="$(git -C "$dir" rev-parse HEAD)"
+
+    if [[ "$actual_head" != "$VLLM_ASCEND_COMMIT" ]]; then
+        echo "[ERROR] vLLM-Ascend HEAD mismatch."
+        echo "        expected: $VLLM_ASCEND_COMMIT"
+        echo "        actual  : $actual_head"
+        exit 1
+    fi
 
 
     echo
@@ -1116,7 +1144,7 @@ if need_build \
 
 
     VLLM_TARGET_DEVICE=empty \
-    SETUPTOOLS_SCM_PRETEND_VERSION=0.26.0 \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.30.0 \
     python3 -m pip install \
         -e . \
         --no-build-isolation
@@ -1271,6 +1299,17 @@ AFD_PLUGIN_STAMP="$STAMP_DIR/afd-plugin"
 cd "$AFD_PLUGIN_DIR"
 
 
+# AFD 必须通过 Python 插件机制接入，不得修改 vLLM 或 vLLM-Ascend 的
+# 已跟踪源码。记录安装前状态，安装完成后做严格对比。
+VLLM_TREE_BEFORE="$(
+    git -C "$VLLM_DIR" status --porcelain --untracked-files=no
+)"
+
+VLLM_ASCEND_TREE_BEFORE="$(
+    git -C "$VLLM_ASCEND_DIR" status --porcelain --untracked-files=no
+)"
+
+
 if need_build \
     "$AFD_PLUGIN_DIR" \
     "$AFD_PLUGIN_STAMP"; then
@@ -1303,11 +1342,36 @@ else
 fi
 
 
+VLLM_TREE_AFTER="$(
+    git -C "$VLLM_DIR" status --porcelain --untracked-files=no
+)"
+
+VLLM_ASCEND_TREE_AFTER="$(
+    git -C "$VLLM_ASCEND_DIR" status --porcelain --untracked-files=no
+)"
+
+if [[ "$VLLM_TREE_AFTER" != "$VLLM_TREE_BEFORE" ]]; then
+    echo "[ERROR] afd-plugin installation modified tracked vLLM source files."
+    git -C "$VLLM_DIR" status --short
+    exit 1
+fi
+
+if [[ "$VLLM_ASCEND_TREE_AFTER" != "$VLLM_ASCEND_TREE_BEFORE" ]]; then
+    echo "[ERROR] afd-plugin installation modified tracked vLLM-Ascend source files."
+    git -C "$VLLM_ASCEND_DIR" status --short
+    exit 1
+fi
+
+echo "[afd-plugin] Verified: vLLM source trees were not modified."
+
+
 # -----------------------------------------------------------------------------
 # Verify
 # -----------------------------------------------------------------------------
 
 python3 - <<'PY'
+from importlib.metadata import entry_points
+
 import afd_plugin
 
 print("[afd-plugin] import OK")
@@ -1316,6 +1380,22 @@ print(
     "[afd-plugin] version =",
     getattr(afd_plugin, "__version__", "unknown")
 )
+
+plugins = {
+    ep.name: ep.value
+    for ep in entry_points(group="vllm.general_plugins")
+}
+
+actual = plugins.get("afd")
+expected = "afd_plugin:register_afd"
+
+if actual != expected:
+    raise RuntimeError(
+        "AFD vllm.general_plugins entry point mismatch: "
+        f"expected={expected!r}, actual={actual!r}"
+    )
+
+print("[afd-plugin] entry point =", f"afd -> {actual}")
 PY
 
 
@@ -1367,7 +1447,7 @@ echo
 python3 -m pip show \
     vllm \
     vllm-ascend \
-    afd-plugin \
+    vllm-afd-plugin \
     torch \
     torch-npu \
     triton-ascend \
@@ -1525,8 +1605,9 @@ echo "Clone strategy:"
 echo
 echo "  vllm:"
 echo "    ref   = $VLLM_REF"
+echo "    commit= $VLLM_COMMIT"
 echo "    depth = 1"
-echo "    only v0.26.0 is downloaded"
+echo "    only v0.30.0 is downloaded"
 
 
 echo

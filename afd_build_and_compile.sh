@@ -53,13 +53,18 @@
 #       https://github.com/Pingzii/afd-plugin.git
 #
 #     branch:
-#       main
+#       feat/npu-dsv4-a5-cache-dtype
 #
 #     处理：
 #       正常 git clone 整个仓库
-#       checkout main
+#       checkout feat/npu-dsv4-a5-cache-dtype
+#       打开 AFD_BUILD_ASCEND_OPS=1 编译 A2E / E2A 自定义算子
 #       通过 vllm.general_plugins entry point 安装 AFD
 #       不修改 vLLM / vLLM-Ascend 源码树
+#
+#     该分支相对 main 新增 A2E 的 MXFP8 传输（quant_mode=4）：
+#       算子来自 vllm-project/afd-plugin PR #444（csrc 改动已合入本分支）
+#       其余为 afd-plugin 侧改动，不需要给 vllm-ascend 打 patch
 #
 #
 # 编译顺序：
@@ -265,12 +270,20 @@ VLLM_ASCEND_COMMIT="8d4409d6256d8a6729140ddcc0d1889e3f96cdd6"
 # -----------------------------------------------------------------------------
 # afd-plugin
 #
-# 正常完整 clone，使用 main。
+# 正常完整 clone，使用 A2E MXFP8 特性分支。
+#
+# 该分支相对 main 多出：
+#
+#   - A2E 算子的 MXFP8 传输支持（quant_mode=4，来自 vllm-project/afd-plugin PR #444）
+#   - 连接器侧的量化 / 补齐 / 传参
+#   - FFN 侧的 scale 解析（afd-plugin 运行时 patch，不改 vllm-ascend 源码）
+#
+# vllm-ascend 仍然固定在下面的 commit，不需要打任何 patch。
 # -----------------------------------------------------------------------------
 
 AFD_PLUGIN_URL="https://github.com/Pingzii/afd-plugin.git"
 
-AFD_PLUGIN_BRANCH="main"
+AFD_PLUGIN_BRANCH="feat/npu-dsv4-a5-cache-dtype"
 
 
 # =============================================================================
@@ -793,15 +806,15 @@ clone_vllm_ascend()
 #
 # clone 完以后：
 #
-#   checkout main
+#   checkout "$AFD_PLUGIN_BRANCH"
 #
 # 仓库已存在：
 #
 #   fetch origin
 #       ↓
-#   checkout main
+#   checkout "$AFD_PLUGIN_BRANCH"
 #       ↓
-#   pull --ff-only origin main
+#   pull --ff-only origin "$AFD_PLUGIN_BRANCH"
 #
 # =============================================================================
 
@@ -893,7 +906,7 @@ clone_afd_plugin()
 
 
     # -------------------------------------------------------------------------
-    # checkout main
+    # checkout "$AFD_PLUGIN_BRANCH"
     # -------------------------------------------------------------------------
 
     echo
@@ -901,7 +914,7 @@ clone_afd_plugin()
     echo "      $AFD_PLUGIN_BRANCH"
 
 
-    # 本地没有 main 时，基于 origin/main 创建。
+    # 本地没有该分支时，基于 origin/<branch> 创建。
     if git -C "$dir" show-ref \
         --verify \
         --quiet \
@@ -924,7 +937,7 @@ clone_afd_plugin()
     # -------------------------------------------------------------------------
     # 只允许 fast-forward。
     #
-    # 如果本地 main 出现自己额外的 commit，
+    # 如果本地该分支出现自己额外的 commit，
     # 不允许脚本自动 merge。
     # -------------------------------------------------------------------------
 
@@ -1317,10 +1330,16 @@ if need_build \
     echo "[afd-plugin] Building..."
     echo "[afd-plugin] branch=$AFD_PLUGIN_BRANCH"
     echo "[afd-plugin] SOC_VERSION=$SOC_VERSION"
+    echo "[afd-plugin] AFD_BUILD_ASCEND_OPS=1"
     echo
 
 
+    # AFD_BUILD_ASCEND_OPS=1 强制编译 A2E / E2A 自定义算子与 Torch 扩展。
+    # 不设时靠 setup.py 的 _running_on_ascend_platform() 判断（容器里能
+    # import torch_npu 也会编译），显式打开是为了让"这一版必须重编算子"
+    # 这件事在日志里可查。
     SOC_VERSION="$SOC_VERSION" \
+    AFD_BUILD_ASCEND_OPS=1 \
     python3 -m pip install \
         -e . \
         --no-build-isolation
@@ -1526,6 +1545,55 @@ from afd_plugin.compat.npu import ensure_afd_ascend_ops_loaded
 ensure_afd_ascend_ops_loaded()
 
 print("AFD_OPS_OK")
+PY
+
+
+# -----------------------------------------------------------------------------
+# A2E MXFP8 传输接口
+#
+# 本分支的算子改动给 a2e 加了 x_scale / quant_mode 两个参数。这一步确认
+# 扩展真的重编了：如果装着的还是旧扩展，schema 里不会有这两个名字。
+# 在编译阶段拦下来，比等起服务时报 TORCH_CHECK 要好定位得多。
+# -----------------------------------------------------------------------------
+
+echo
+echo "---------------- A2E MXFP8 transport interface ----------------"
+echo
+
+
+python3 - <<'PY'
+import torch
+import torch_npu
+
+from afd_plugin.compat.npu import ensure_afd_ascend_ops_loaded
+
+ensure_afd_ascend_ops_loaded()
+
+op = torch.ops.afd_ascend.a2e
+
+default = getattr(op, "default", None)
+
+schema = str(
+    default._schema if default is not None else op._schema
+)
+
+missing = [
+    name
+    for name in ("x_scale", "quant_mode")
+    if name not in schema
+]
+
+if missing:
+    raise RuntimeError(
+        "a2e is missing the MXFP8 transport argument(s) "
+        f"{missing}: the compiled extension is older than the checked-out "
+        "source. Re-run this script with --force.\n"
+        f"schema: {schema}"
+    )
+
+print("[a2e] schema =", schema)
+
+print("A2E_MXFP8_OK")
 PY
 
 

@@ -6,13 +6,22 @@
 # A5 / Ascend950 AFD 推理栈一键构建脚本
 #
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# !!! 重要：首次使用必须添加 --force 参数                              !!!
+# !!! 全新容器：必须加 --force                                          !!!
 # !!!                                                                        !!!
 # !!!   bash afd_build_and_compile.sh --force                                !!!
 # !!!                                                                        !!!
 # !!! 新容器可能复用 /home 下旧的源码和 build stamp，但容器内 Python 包    !!!
 # !!! 仍来自基础镜像。不加 --force 可能错误跳过 vLLM / vLLM-Ascend 安装。   !!!
-# !!! 只有确认当前容器已经完整构建成功后，后续执行才可以不加 --force。       !!!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !!! 已经建好的容器：不要加 --force                                     !!!
+# !!!                                                                        !!!
+# !!!   bash afd_build_and_compile.sh                                        !!!
+# !!!                                                                        !!!
+# !!! --force 会 rm -rf 三个仓库，把已编好的 vLLM / vLLM-Ascend 一起删掉。  !!!
+# !!! 不加 --force 时按 .build_stamps 判断：只有 Git HEAD 变化的仓库重编。  !!!
+# !!! 例如只把 afd-plugin 切到新分支，就只重编 afd-plugin 和它的算子。      !!!
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #
 # 前提：
@@ -342,10 +351,35 @@ echo
 
 if [[ "$FORCE" -eq 1 ]]; then
     echo "[INFO] --force 已启用：将从零 clone 并重新 build。"
+
+    # 在已经建好的容器里误用 --force 代价很大：vLLM 和 vLLM-Ascend 会被
+    # 删掉重编。这里先把会消失的东西列出来。
+    for _existing in vllm vllm-ascend afd-plugin; do
+        if [[ -d "$ROOT/$_existing/.git" ]]; then
+
+            _head="$(
+                git -C "$ROOT/$_existing" \
+                    rev-parse \
+                    --short HEAD \
+                    2>/dev/null || echo '?'
+            )"
+
+            echo "[WARN] --force 将删除并重新 clone: $ROOT/$_existing  (HEAD $_head)"
+
+            if [[ -f "$STAMP_DIR/$_existing" ]]; then
+                echo "[WARN]   已有成功构建记录，删除后需要从头编译。"
+            fi
+        fi
+    done
+
+    echo
+    echo "[INFO] 如果只想更新 afd-plugin：不要加 --force。"
+    echo "[INFO] 不带 --force 时只有 Git HEAD 变化的仓库会重新编译，"
+    echo "[INFO] 其余仓库按 .build_stamps 跳过。"
 else
-    echo "[WARN] 当前未使用 --force。"
-    echo "[WARN] 如果这是首次使用，请立即停止并改用："
-    echo "[WARN] bash afd_build_and_compile.sh --force"
+    echo "[INFO] 当前未使用 --force：按 .build_stamps 只重编 Git HEAD 变化的仓库。"
+    echo "[INFO] 如果这是全新容器（/home 下有旧源码但容器内没装过），"
+    echo "[INFO] 才需要改用：bash afd_build_and_compile.sh --force"
 fi
 
 

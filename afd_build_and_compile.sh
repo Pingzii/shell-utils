@@ -46,6 +46,9 @@
 #     处理：
 #       正常 git clone 整个仓库
 #       checkout 8d4409d6
+#       cherry-pick PR #17998 的改名提交
+#       （kda_gate_cumsum -> kda_gate_cumsum_vllm，见第 9b 节）
+#       该 cherry-pick 会新增一个 commit，HEAD 不再等于 8d4409d6
 #
 #
 #   afd-plugin
@@ -90,7 +93,16 @@
 #   - source proxy.sh
 #   - 创建 Docker
 #   - 修改 Docker 配置
-#   - 应用 patch
+#   - 应用下面这一条以外的任何 patch
+#
+#
+# 唯一的源码改动：
+#
+#   vllm-ascend 上 cherry-pick PR #17998 的改名提交，见第 9b 节。
+#
+#   该改动是确定性的：同一个基线 commit 上重复执行会得到同一个 commit SHA，
+#   所以 build stamp 依然有效，不会每次重复编译 vLLM-Ascend。
+#   升级脚本后第一次执行会因为 HEAD 变化而重新编译一次 vLLM-Ascend。
 #
 # =============================================================================
 
@@ -254,12 +266,40 @@ VLLM_COMMIT="ced6857afa0ea7b2e3f0846a62e1394e90f15607"
 # -----------------------------------------------------------------------------
 # vLLM-Ascend
 #
-# 正常完整 clone，然后 checkout 固定 commit。
+# 正常完整 clone，然后 checkout 固定 commit，
+# 再 cherry-pick PR #17998 的改名提交。
 # -----------------------------------------------------------------------------
 
 VLLM_ASCEND_URL="https://github.com/vllm-project/vllm-ascend.git"
 
 VLLM_ASCEND_COMMIT="8d4409d6256d8a6729140ddcc0d1889e3f96cdd6"
+
+
+# -----------------------------------------------------------------------------
+# vLLM-Ascend PR #17998
+#
+#   https://github.com/vllm-project/vllm-ascend/pull/17998
+#
+#   [Refactor][Ops] Rename KDA gate cumsum custom op with vllm suffix
+#
+# 取该 PR 的改名提交，cherry-pick 到上面的 VLLM_ASCEND_COMMIT 上。
+# 细节和冲突处理见第 9b 节。
+# -----------------------------------------------------------------------------
+
+VLLM_ASCEND_PR_NUMBER=17998
+
+VLLM_ASCEND_PR_COMMIT="4f869f9a8d3257e243fdd8fd9d998231f069ffe8"
+
+
+# 固定时间与 committer 身份，保证重复执行得到同一个 commit SHA，
+# 否则 build stamp 每次都会失效、每次都重新编译 vLLM-Ascend。
+VLLM_ASCEND_PR_DATE="2026-10-08T15:30:23+08:00"
+
+VLLM_ASCEND_PR_AUTHOR="Foriv <2293567056@qq.com>"
+
+VLLM_ASCEND_PR_COMMITTER_NAME="AFD build script"
+
+VLLM_ASCEND_PR_COMMITTER_EMAIL="afd-build@localhost"
 
 
 # -----------------------------------------------------------------------------
@@ -776,6 +816,423 @@ clone_vllm_ascend()
 
 
 # =============================================================================
+# 9b. vLLM-Ascend: cherry-pick PR #17998
+#
+# 上游 PR：
+#
+#   https://github.com/vllm-project/vllm-ascend/pull/17998
+#
+#   [Refactor][Ops] Rename KDA gate cumsum custom op with vllm suffix
+#
+# 该 PR 把 csrc/attention/kda_gate_cumsum 下的整条算子链（OpDef、tiling、
+# kernel、ACLNN、Torch / Meta 注册、A2/A3/A5 编译列表、调用方）改名为
+# kda_gate_cumsum_vllm / KdaGateCumsumVllm，让 vLLM 自定义算子拥有独立符号，
+# 不再与 FLA 的同名算子冲突。
+# 参数、张量布局、计算逻辑和实现源码都不变。
+#
+#
+# 为什么不能直接 git cherry-pick：
+#
+#   本脚本固定 VLLM_ASCEND_COMMIT = 8d4409d6，
+#   而该 PR 的基线是 dd87d93c，两者相差 166 个 commit。
+#   其中四个共享文件被这 166 个 commit 改过：
+#
+#     csrc/build_aclnn.sh
+#     csrc/torch_binding.cpp
+#     csrc/torch_binding_meta.cpp
+#     tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_kda_aclnn.py
+#
+#   直接 cherry-pick 会在这四个文件上冲突。
+#
+#   已逐个核对：该 PR 对这四个文件的改动只有标识符改名，
+#   所以按“本基线原文 + 同样的改名”解决，结果与该 PR 的语义一致。
+#
+#
+# 本基线额外的两个引用：
+#
+#   下面两个文件在 8d4409d6 上仍然引用旧名字，
+#   但在该 PR 的基线上已经不存在（上游不再引用），所以上游没有改它们，
+#   这里必须一起改，否则目录改名后编译会失败：
+#
+#     csrc/attention/chunk_kda_fwd/op_host/CMakeLists.txt
+#     csrc/attention/chunk_kda_fwd/op_kernel/chunk_kda_fwd_common.h
+#
+#
+# 结果：
+#
+#   cherry-pick 作为本仓库的一个 commit 保存，工作树保持干净：
+#
+#     HEAD = VLLM_ASCEND_COMMIT + 这一个 commit
+#
+#   author 保持上游作者，committer 身份与提交时间固定，
+#   因此同一个基线 commit 上重复执行会得到同一个 commit SHA。
+# =============================================================================
+
+
+# 对该 PR 涉及的文件套用改名。
+rename_kda_gate_cumsum()
+{
+    sed -i \
+        -e 's/kda_gate_cumsum/kda_gate_cumsum_vllm/g' \
+        -e 's/KdaGateCumsum/KdaGateCumsumVllm/g' \
+        "$1"
+}
+
+
+apply_vllm_ascend_pr_17998()
+{
+    local dir="$ROOT/vllm-ascend"
+
+
+    # -------------------------------------------------------------------------
+    # 该 PR 会冲突的四个文件（本基线与该 PR 基线之间被其它 commit 改过）。
+    # -------------------------------------------------------------------------
+
+    local conflict_files=(
+        "csrc/build_aclnn.sh"
+        "csrc/torch_binding.cpp"
+        "csrc/torch_binding_meta.cpp"
+        "tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_kda_aclnn.py"
+    )
+
+
+    # -------------------------------------------------------------------------
+    # 本基线额外引用旧名字的文件（该 PR 的基线上已不存在）。
+    # -------------------------------------------------------------------------
+
+    local extra_files=(
+        "csrc/attention/chunk_kda_fwd/op_host/CMakeLists.txt"
+        "csrc/attention/chunk_kda_fwd/op_kernel/chunk_kda_fwd_common.h"
+    )
+
+
+    # 该 PR 改动 17 个文件，加上上面两个额外文件，共 19 个。
+    local expected_paths=19
+
+
+    cd "$dir"
+
+
+    echo
+    echo "-------------------------------------------------------------------"
+    echo "[pr] vLLM-Ascend PR #$VLLM_ASCEND_PR_NUMBER"
+    echo "[pr] commit : $VLLM_ASCEND_PR_COMMIT"
+    echo "[pr] base   : $VLLM_ASCEND_COMMIT"
+    echo "-------------------------------------------------------------------"
+
+
+    # -------------------------------------------------------------------------
+    # 基线本来就包含改名（例如以后把 VLLM_ASCEND_COMMIT 提到该 PR 之后）。
+    # -------------------------------------------------------------------------
+
+    if [[ ! -d csrc/attention/kda_gate_cumsum ]] && \
+       [[ -d csrc/attention/kda_gate_cumsum_vllm ]]; then
+
+        echo "[pr] 当前 commit 已包含该改名，跳过 cherry-pick。"
+
+        return 0
+    fi
+
+
+    if [[ ! -d csrc/attention/kda_gate_cumsum ]]; then
+
+        echo "[ERROR] 找不到改名前目录："
+        echo "        $dir/csrc/attention/kda_gate_cumsum"
+
+        exit 1
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # 上一次运行如果中断在这里，会留下未提交的改动；
+    # 先归位到基线 commit，保证每次从同一个状态开始。
+    # -------------------------------------------------------------------------
+
+    if [[ -n "$(
+        git status --porcelain
+    )" ]]; then
+
+        echo "[WARN] vllm-ascend 工作树不干净（可能是上次运行留下的中间状态）。"
+        echo "[WARN] 重置到基线 commit：$VLLM_ASCEND_COMMIT"
+
+        git reset --hard "$VLLM_ASCEND_COMMIT"
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # 确保 PR commit 在本地。
+    #
+    # 完整 clone 的上游 main 已经包含这个提交（该 PR 已合入），
+    # 缺失时才需要 fetch。
+    # -------------------------------------------------------------------------
+
+    if ! git cat-file \
+        -e "${VLLM_ASCEND_PR_COMMIT}^{commit}" \
+        2>/dev/null; then
+
+        echo
+        echo "[pr] 本地缺少该 commit，尝试获取。"
+
+        if ! git fetch \
+            origin \
+            "refs/pull/${VLLM_ASCEND_PR_NUMBER}/head"; then
+
+            echo "[pr] refs/pull 获取失败，改为直接获取 commit。"
+
+            git fetch \
+                origin \
+                "$VLLM_ASCEND_PR_COMMIT"
+        fi
+    fi
+
+
+    if ! git cat-file \
+        -e "${VLLM_ASCEND_PR_COMMIT}^{commit}" \
+        2>/dev/null; then
+
+        echo
+        echo "[ERROR] 无法获取 PR commit："
+        echo "        $VLLM_ASCEND_PR_COMMIT"
+
+        exit 1
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # cherry-pick，但先不 commit。
+    #
+    # 已知会在这四个文件上冲突，冲突解决后再生成 commit。
+    # -------------------------------------------------------------------------
+
+    echo
+    echo "[pr] cherry-pick --no-commit $VLLM_ASCEND_PR_COMMIT"
+
+
+    local rc=0
+
+    git cherry-pick \
+        --no-commit \
+        "$VLLM_ASCEND_PR_COMMIT" || rc=$?
+
+
+    local unmerged
+
+    unmerged="$(
+        git diff \
+            --name-only \
+            --diff-filter=U
+    )"
+
+
+    # 失败但又没有冲突文件，说明不是预期的冲突场景，不能继续。
+    if [[ "$rc" -ne 0 && -z "$unmerged" ]]; then
+
+        echo
+        echo "[ERROR] cherry-pick 失败，且没有冲突文件，无法按预期解决。"
+
+        git reset --hard "$VLLM_ASCEND_COMMIT"
+
+        exit 1
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # 冲突必须只出现在已知的四个文件里。
+    # 一旦出现别的冲突，说明本基线与预期不符，
+    # 立即失败，绝不让改了一半的源码树进入编译。
+    # -------------------------------------------------------------------------
+
+    local f
+    local candidate
+    local known
+
+    while IFS= read -r f; do
+
+        [[ -z "$f" ]] && continue
+
+        known=0
+
+        for candidate in "${conflict_files[@]}"; do
+
+            if [[ "$f" == "$candidate" ]]; then
+                known=1
+            fi
+        done
+
+        if [[ "$known" -eq 0 ]]; then
+
+            echo
+            echo "[ERROR] 出现预期外的冲突文件："
+            echo "        $f"
+
+            git reset --hard "$VLLM_ASCEND_COMMIT"
+
+            exit 1
+        fi
+
+    done <<< "$unmerged"
+
+
+    # -------------------------------------------------------------------------
+    # 解决冲突：
+    #
+    #   取本基线原文（HEAD），再套用该 PR 的改名。
+    #
+    # 该 PR 对这四个文件的改动只有改名，所以这里等价于该 PR 的改法；
+    # 没有冲突的文件用同样方式处理也不会改变结果。
+    # -------------------------------------------------------------------------
+
+    for f in "${conflict_files[@]}"; do
+
+        git checkout \
+            HEAD \
+            -- "$f"
+
+        rename_kda_gate_cumsum "$f"
+
+        git add "$f"
+
+        echo "[pr] 按基线原文 + 改名解决：$f"
+    done
+
+
+    # -------------------------------------------------------------------------
+    # 本基线额外引用旧名字的两个文件。
+    # -------------------------------------------------------------------------
+
+    for f in "${extra_files[@]}"; do
+
+        if [[ ! -f "$f" ]]; then
+
+            echo
+            echo "[ERROR] 缺少文件："
+            echo "        $dir/$f"
+
+            git reset --hard "$VLLM_ASCEND_COMMIT"
+
+            exit 1
+        fi
+
+        rename_kda_gate_cumsum "$f"
+
+        git add "$f"
+
+        echo "[pr] 基线额外引用改名：$f"
+    done
+
+
+    # -------------------------------------------------------------------------
+    # 生成 commit。
+    #
+    # author     ：保持上游作者与作者时间
+    # committer  ：固定身份与时间，保证 SHA 稳定
+    # --no-verify：不触发仓库 git hook
+    # -------------------------------------------------------------------------
+
+    GIT_AUTHOR_DATE="$VLLM_ASCEND_PR_DATE" \
+    GIT_COMMITTER_DATE="$VLLM_ASCEND_PR_DATE" \
+    GIT_COMMITTER_NAME="$VLLM_ASCEND_PR_COMMITTER_NAME" \
+    GIT_COMMITTER_EMAIL="$VLLM_ASCEND_PR_COMMITTER_EMAIL" \
+    git commit \
+        --quiet \
+        --no-verify \
+        --author="$VLLM_ASCEND_PR_AUTHOR" \
+        -m "refactor(ops): namespace KDA gate cumsum with vllm suffix" \
+        -m "Port of vllm-project/vllm-ascend#${VLLM_ASCEND_PR_NUMBER} onto ${VLLM_ASCEND_COMMIT}.
+
+(cherry picked from commit ${VLLM_ASCEND_PR_COMMIT})
+
+The four shared files conflict at this pin because it predates the upstream
+base by 166 commits; they are resolved by re-applying the same identifier
+rename to the pin's own content. Two files that still reference the old
+names at this pin (csrc/attention/chunk_kda_fwd/op_host/CMakeLists.txt and
+csrc/attention/chunk_kda_fwd/op_kernel/chunk_kda_fwd_common.h) are renamed
+too; they no longer exist upstream at the PR base."
+
+
+    # -------------------------------------------------------------------------
+    # 结果校验：任何一项不通过就回退到基线 commit 并退出。
+    # -------------------------------------------------------------------------
+
+    local changed
+
+    changed="$(
+        git diff \
+            --name-only \
+            "$VLLM_ASCEND_COMMIT" \
+            HEAD \
+        | wc -l \
+        | tr -d ' '
+    )"
+
+
+    if [[ "$changed" != "$expected_paths" ]]; then
+
+        echo
+        echo "[ERROR] 改动文件数不符合预期。"
+        echo "        expected: $expected_paths"
+        echo "        actual  : $changed"
+
+        git reset --hard "$VLLM_ASCEND_COMMIT"
+
+        exit 1
+    fi
+
+
+    # 旧算子名必须一个都不剩；
+    # kda_gate_cumsum_vllm / KdaGateCumsumVllm 不算残留。
+    local stale
+
+    stale="$(
+        git grep \
+            -n \
+            -E 'kda_gate_cumsum([^_]|$)|KdaGateCumsum([^V]|$)' \
+            HEAD \
+            -- . \
+            || true
+    )"
+
+
+    if [[ -n "$stale" ]]; then
+
+        echo
+        echo "[ERROR] 仍然存在旧算子名："
+        echo "$stale"
+
+        git reset --hard "$VLLM_ASCEND_COMMIT"
+
+        exit 1
+    fi
+
+
+    # 后面 afd-plugin 的“不得修改源码树”校验依赖干净工作树。
+    if [[ -n "$(
+        git status --porcelain
+    )" ]]; then
+
+        echo
+        echo "[ERROR] cherry-pick 后工作树不干净："
+
+        git status --short
+
+        git reset --hard "$VLLM_ASCEND_COMMIT"
+
+        exit 1
+    fi
+
+
+    echo
+    echo "[pr] cherry-pick 完成，HEAD:"
+
+    git log \
+        --oneline \
+        -1
+
+    echo
+}
+
+
+# =============================================================================
 # 10. Clone afd-plugin
 #
 # afd-plugin：
@@ -947,15 +1404,17 @@ clone_afd_plugin()
 
 
 # =============================================================================
-# 11. Clone / Checkout
+# 11. Clone / Checkout / cherry-pick
 # =============================================================================
 
-step "1/5 clone + checkout 三个仓库"
+step "1/5 clone + checkout + vLLM-Ascend cherry-pick"
 
 
 clone_vllm
 
 clone_vllm_ascend
+
+apply_vllm_ascend_pr_17998
 
 clone_afd_plugin
 
@@ -979,6 +1438,8 @@ git -C "$ROOT/vllm" log \
 
 echo
 echo "[vllm-ascend]"
+echo "  base commit : $VLLM_ASCEND_COMMIT"
+echo "  cherry-pick : PR #$VLLM_ASCEND_PR_NUMBER"
 git -C "$ROOT/vllm-ascend" log \
     --oneline \
     -1
@@ -1241,7 +1702,8 @@ if need_build \
 
     echo
     echo "[vllm-ascend] Building..."
-    echo "[vllm-ascend] commit=$VLLM_ASCEND_COMMIT"
+    echo "[vllm-ascend] base commit=$VLLM_ASCEND_COMMIT"
+    echo "[vllm-ascend] cherry-pick=PR #$VLLM_ASCEND_PR_NUMBER"
     echo "[vllm-ascend] SOC_VERSION=$SOC_VERSION"
     echo
 
@@ -1424,6 +1886,8 @@ printf "%-18s " "vllm-ascend:"
 git -C "$ROOT/vllm-ascend" \
     rev-parse \
     --short HEAD
+
+echo "                   (base $VLLM_ASCEND_COMMIT + PR #$VLLM_ASCEND_PR_NUMBER)"
 
 
 printf "%-18s " "afd-plugin:"
@@ -1610,8 +2074,11 @@ echo "    only v0.30.0 is downloaded"
 
 echo
 echo "  vllm-ascend:"
-echo "    clone  = normal full git clone"
-echo "    commit = $VLLM_ASCEND_COMMIT"
+echo "    clone       = normal full git clone"
+echo "    base commit = $VLLM_ASCEND_COMMIT"
+echo "    cherry-pick = PR #$VLLM_ASCEND_PR_NUMBER"
+echo "                  $VLLM_ASCEND_PR_COMMIT"
+echo "                  (kda_gate_cumsum -> kda_gate_cumsum_vllm)"
 
 
 echo

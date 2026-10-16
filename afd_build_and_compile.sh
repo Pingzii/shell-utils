@@ -2191,6 +2191,28 @@ if need_build \
     echo
 
 
+    # -------------------------------------------------------------------------
+    # 清理算子构建目录。
+    #
+    # build_aclnn.sh 只清 output/build_out，故意保留 csrc/build。
+    # 但算子目录改过名（第 9c 节）之后，保留下来的 csrc/build 里还带着
+    # 改名前的算子目录与目标文件，配置生成会因此失败：
+    #
+    #   [ERROR] op <改名前的算子名>: not any obj compile success
+    #   FAILED: CMakeFiles/ops_config_<soc> ...
+    #
+    # 所以只要真的在重建 vllm-ascend，就先清掉它，做一次干净构建。
+    # HEAD 没变时走的是 skip 分支，不受影响。
+    # -------------------------------------------------------------------------
+
+    if [[ -d "$VLLM_ASCEND_DIR/csrc/build" ]]; then
+
+        echo "[vllm-ascend] 清理 csrc/build，避免改名前残留的算子构建状态"
+
+        rm -rf "$VLLM_ASCEND_DIR/csrc/build"
+    fi
+
+
     SOC_VERSION="$SOC_VERSION" \
     python3 -m pip install \
         -e . \

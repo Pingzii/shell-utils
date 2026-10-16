@@ -48,7 +48,9 @@
 #       checkout 8d4409d6
 #       cherry-pick PR #17998 的改名提交
 #       （kda_gate_cumsum -> kda_gate_cumsum_vllm，见第 9b 节）
-#       该 cherry-pick 会新增一个 commit，HEAD 不再等于 8d4409d6
+#       再给另外两个撞名算子改名
+#       （chunk_gated_delta_rule_fwd_h / causal_conv1d，见第 9c 节）
+#       共新增两个 commit，HEAD 不再等于 8d4409d6
 #
 #
 #   afd-plugin
@@ -98,7 +100,15 @@
 #
 # 唯一的源码改动：
 #
-#   vllm-ascend 上 cherry-pick PR #17998 的改名提交，见第 9b 节。
+#   vllm-ascend 上给三个与 CANN 9.2 内置算子撞名的自定义算子换独立符号：
+#
+#     kda_gate_cumsum              -> kda_gate_cumsum_vllm
+#         cherry-pick PR #17998，见第 9b 节
+#     chunk_gated_delta_rule_fwd_h -> chunk_gated_delta_rule_fwd_h_vllm
+#     causal_conv1d                -> causal_conv1d_vllm
+#         见第 9c 节
+#
+#   共产生两个 commit，只改符号名，不改任何计算逻辑。
 #
 #   该改动是确定性的：同一个基线 commit 上重复执行会得到同一个 commit SHA，
 #   所以 build stamp 依然有效，不会每次重复编译 vLLM-Ascend。
@@ -1233,6 +1243,475 @@ too; they no longer exist upstream at the PR base."
 
 
 # =============================================================================
+# 9c. vLLM-Ascend: 其余与 CANN 9.2 内置算子撞名的自定义算子
+#
+# 背景（2026-10-16 绿区实测结论）：
+#
+#   CANN 9.2 自带一套 ops_transformer 内置算子：
+#
+#     /usr/local/Ascend/cann-9.2.0/opp/built-in/op_impl/ai_core/tbe/kernel/
+#       ascend950/ops_transformer/<operator>_apt/
+#
+#   编译自定义算子时，OPC 会拿本仓库的算子定义与 op store 里的同名内置算子
+#   比对；名字相同但 ABI 不同就直接失败：
+#
+#     CausalConv1d            : invalid input nums[8], should equal 12 in op store
+#     ChunkGatedDeltaRuleFwdH : op_info_parser ... NoneType object is not subscriptable
+#     KdaGateCumsum           : 同一类（已由第 9b 节的 #17998 解决，实测 6/6 Done）
+#
+#   内置算子删不掉（动了整个 toolkit 就坏了），只能给本仓库的算子换独立符号。
+#   这就是上游一直用 _vllm 后缀的原因。
+#
+#
+# 本节做两件改名（只改符号名，不改任何计算逻辑）：
+#
+#   1. moe/chunk_gated_delta_rule_fwd_h -> moe/chunk_gated_delta_rule_fwd_h_vllm
+#
+#      对照上游 PR #17997（Restore custom GDN FwdH with vllm-specific names）。
+#      已逐文件核对：该 PR 对 52 个文件的改动里，47 个恰好等于下面这三档改名
+#      （小写 / CamelCase / 大写 include guard）。
+#
+#      该 PR 同时把 python 路径从 fla_npu 切回内置算子；本基线早于 #17727，
+#      本来就还在用内置算子，所以那部分不需要、也不采纳。
+#
+#   2. moe/causal_conv1d -> moe/causal_conv1d_vllm
+#
+#      上游 #17727 是删掉它、改走 fla_npu；但本基线的 glm5next 仍然通过
+#      torch.ops._C_ascend.npu_causal_conv1d_custom -> aclnnCausalConv1d 在用它，
+#      所以只改 CANN 算子类型与 ACLNN 符号，Torch 入口名和 python 调用方不动。
+# =============================================================================
+
+
+# 在单个文件里做一次三档大小写改名。
+#
+#   $1 文件
+#   $2 旧小写   $3 新小写
+#   $4 旧Camel  $5 新Camel
+#   $6 旧大写   $7 新大写（旧大写为空则跳过）
+#   $8.. 需要原样保留的同前缀符号
+rename_in_file()
+{
+    local file="$1"
+    local old_lower="$2" new_lower="$3"
+    local old_camel="$4" new_camel="$5"
+    local old_upper="$6" new_upper="$7"
+
+    shift 7
+
+    local protect=("$@")
+    local expr=()
+    local i=0
+    local p
+
+    # 先保护不能跟着改的同前缀符号
+    for p in "${protect[@]}"; do
+
+        [[ -z "$p" ]] && continue
+
+        expr+=(-e "s|${p}|@@PROTECT${i}@@|g")
+
+        i=$((i + 1))
+    done
+
+    expr+=(-e "s|${old_lower}|${new_lower}|g")
+
+    if [[ -n "$old_camel" ]]; then
+        expr+=(-e "s|${old_camel}|${new_camel}|g")
+    fi
+
+    if [[ -n "$old_upper" ]]; then
+        expr+=(-e "s|${old_upper}|${new_upper}|g")
+    fi
+
+    # 还原被保护的符号
+    i=0
+
+    for p in "${protect[@]}"; do
+
+        [[ -z "$p" ]] && continue
+
+        expr+=(-e "s|@@PROTECT${i}@@|${p}|g")
+
+        i=$((i + 1))
+    done
+
+    sed -i "${expr[@]}" "$file"
+}
+
+
+# python 侧只改自定义算子的引用，不动同名的 triton helper。
+#
+# 只处理这两种形态：
+#
+#   torch.ops._C_ascend.<算子名>
+#   hasattr(..., "<算子名>")
+rename_op_refs_in_python()
+{
+    local file="$1"
+    local old_name="$2"
+    local new_name="$3"
+
+    sed -i \
+        -e "s|_C_ascend\\.${old_name}|_C_ascend.${new_name}|g" \
+        -e "s|\"${old_name}\"|\"${new_name}\"|g" \
+        "$file"
+}
+
+
+# 把一个自定义算子的整条链改成独立符号：
+# 目录名 + 目录内文件名 + 目录内内容 + 目录外引用。
+#
+#   $1 算子目录（相对 csrc/，如 moe/causal_conv1d）
+#   $2 旧小写名
+#   $3 旧 CamelCase 名
+#   $4 旧大写名（可为空字符串）
+#   $5 目录外需要整文件改名的（空格分隔，可为空）
+#   $6 目录外只改算子引用的 python 文件（空格分隔，可为空）
+#   $7 不能跟着改的同前缀符号（空格分隔，可为空）
+rename_custom_op()
+{
+    local op_rel="$1"
+    local old_lower="$2"
+    local old_camel="$3"
+    local old_upper="$4"
+    local outside_all="$5"
+    local outside_py="$6"
+    local protect="$7"
+
+    local new_lower="${old_lower}_vllm"
+    local new_camel="${old_camel}Vllm"
+    local new_upper=""
+
+    [[ -n "$old_upper" ]] && new_upper="${old_upper}_VLLM"
+
+    local old_dir="csrc/${op_rel}"
+    local parent="${op_rel%/*}"
+    local new_dir="csrc/${parent}/${new_lower}"
+
+    local f
+    local base
+    local newbase
+
+
+    if [[ ! -d "$old_dir" ]]; then
+
+        echo "[rename] $old_dir 不存在，跳过。"
+
+        return 0
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # 1. 目录改名
+    # -------------------------------------------------------------------------
+
+    git mv "$old_dir" "$new_dir"
+
+
+    # -------------------------------------------------------------------------
+    # 2. 目录内文件名里含旧小写名的，一并改名
+    # -------------------------------------------------------------------------
+
+    while IFS= read -r f; do
+
+        base="$(basename "$f")"
+
+        case "$base" in
+
+            *"$old_lower"*)
+
+                newbase="${base//$old_lower/$new_lower}"
+
+                git mv "$f" "$(dirname "$f")/$newbase"
+                ;;
+        esac
+    done < <(git ls-files "$new_dir")
+
+
+    # -------------------------------------------------------------------------
+    # 3. 目录内所有文件做三档改名
+    # -------------------------------------------------------------------------
+
+    while IFS= read -r f; do
+
+        rename_in_file \
+            "$f" \
+            "$old_lower" "$new_lower" \
+            "$old_camel" "$new_camel" \
+            "$old_upper" "$new_upper" \
+            $protect
+    done < <(git ls-files "$new_dir")
+
+
+    # -------------------------------------------------------------------------
+    # 4. 目录外需要整文件改名的
+    # -------------------------------------------------------------------------
+
+    for f in $outside_all; do
+
+        if [[ ! -f "$f" ]]; then
+
+            echo "[ERROR] 需要改名的文件不存在："
+            echo "        $f"
+
+            return 1
+        fi
+
+        rename_in_file \
+            "$f" \
+            "$old_lower" "$new_lower" \
+            "$old_camel" "$new_camel" \
+            "$old_upper" "$new_upper" \
+            $protect
+    done
+
+
+    # -------------------------------------------------------------------------
+    # 5. 目录外只改算子引用的 python 文件
+    # -------------------------------------------------------------------------
+
+    for f in $outside_py; do
+
+        if [[ ! -f "$f" ]]; then
+
+            echo "[ERROR] 需要改名的 python 文件不存在："
+            echo "        $f"
+
+            return 1
+        fi
+
+        rename_op_refs_in_python "$f" "$old_lower" "$new_lower"
+    done
+
+
+    git add -A
+
+    echo "[rename] ${op_rel} -> ${parent}/${new_lower}"
+
+    return 0
+}
+
+
+apply_vllm_ascend_op_renames()
+{
+    local dir="$ROOT/vllm-ascend"
+
+
+    cd "$dir"
+
+
+    # 进入本函数时的 HEAD（= 9b 那个 cherry-pick 之后的 commit）。
+    # 任何一项校验不过都回退到这里，绝不把半成品留给编译。
+    local prev_head
+
+    prev_head="$(git rev-parse HEAD)"
+
+
+    echo
+    echo "-------------------------------------------------------------------"
+    echo "[rename] 给与 CANN 9.2 内置算子撞名的自定义算子换独立符号"
+    echo "-------------------------------------------------------------------"
+
+
+    # -------------------------------------------------------------------------
+    # 1. chunk_gated_delta_rule_fwd_h（对照上游 PR #17997 的改名部分）
+    #
+    #    保护 chunk_gated_delta_rule_fwd_hupdate：
+    #    那是另一个 triton helper，只是名字前缀相同，不能跟着改。
+    # -------------------------------------------------------------------------
+
+    rename_custom_op \
+        "moe/chunk_gated_delta_rule_fwd_h" \
+        "chunk_gated_delta_rule_fwd_h" \
+        "ChunkGatedDeltaRuleFwdH" \
+        "CHUNK_GATED_DELTA_RULE_FWD_H" \
+        "csrc/build_aclnn.sh csrc/torch_binding.cpp csrc/torch_binding_meta.cpp csrc/attention/chunk_kda_fwd/op_host/CMakeLists.txt csrc/attention/chunk_kda_fwd/op_kernel/chunk_kda_fwd_common.h csrc/attention/chunk_kda_fwd/docs/design.md" \
+        "vllm_ascend/ops/triton/fla/chunk.py vllm_ascend/_310p/ops/fla/chunk_gated_delta_rule.py tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_gated_delta_rule_fwd_h_aclnn.py tests/e2e/nightly/310p/single_node/ops/singlecard_ops/test_chunk_gated_delta_rule_fwd_h_aclnn.py tests/ut/ops/test_gdn_chunk_meta.py" \
+        "chunk_gated_delta_rule_fwd_hupdate" \
+        || exit 1
+
+
+    # -------------------------------------------------------------------------
+    # 2. causal_conv1d（上游 #17727 删除并改走 fla_npu；这里只改名）
+    #
+    #    保护同前缀的另一个算子和 Torch 入口名：
+    #      causal_conv1d_v310 / causal_conv1d_310 / CausalConv1dV310
+    #      npu_causal_conv1d_custom / npu_causal_conv1d_310
+    # -------------------------------------------------------------------------
+
+    rename_custom_op \
+        "moe/causal_conv1d" \
+        "causal_conv1d" \
+        "CausalConv1d" \
+        "CAUSAL_CONV1D" \
+        "csrc/build_aclnn.sh csrc/torch_binding.cpp" \
+        "" \
+        "causal_conv1d_v310 causal_conv1d_310 CausalConv1dV310 CausalConv1D310 npu_causal_conv1d_custom npu_causal_conv1d_310" \
+        || exit 1
+
+
+    # -------------------------------------------------------------------------
+    # 校验（commit 之前就能查的）：新目录在、旧名字在 csrc 里清零、
+    # python 侧不再引用旧算子名。
+    # -------------------------------------------------------------------------
+
+    local stale
+
+    if [[ ! -d csrc/moe/chunk_gated_delta_rule_fwd_h_vllm ]] || \
+       [[ ! -d csrc/moe/causal_conv1d_vllm ]]; then
+
+        echo
+        echo "[ERROR] 改名后的算子目录不存在。"
+
+        git reset --hard "$prev_head"
+
+        exit 1
+    fi
+
+
+    stale="$(
+        git grep \
+            -n \
+            -E 'chunk_gated_delta_rule_fwd_h([^u_]|$)|CHUNK_GATED_DELTA_RULE_FWD_H([^_]|$)' \
+            -- csrc \
+            || true
+    )"
+
+    if [[ -n "$stale" ]]; then
+
+        echo
+        echo "[ERROR] csrc 里仍有 chunk_gated_delta_rule_fwd_h 旧名："
+        echo "$stale"
+
+        git reset --hard "$prev_head"
+
+        exit 1
+    fi
+
+
+    stale="$(
+        git grep \
+            -n \
+            -E 'causal_conv1d([^_a-z0-9]|$)' \
+            -- csrc \
+            | grep -v 'causal_conv1d_vllm' \
+            | grep -v 'causal_conv1d_v310' \
+            || true
+    )"
+
+    if [[ -n "$stale" ]]; then
+
+        echo
+        echo "[ERROR] csrc 里仍有 causal_conv1d 旧名："
+        echo "$stale"
+
+        git reset --hard "$prev_head"
+
+        exit 1
+    fi
+
+
+    stale="$(
+        git grep \
+            -n \
+            -E '_C_ascend\.chunk_gated_delta_rule_fwd_h([^u_]|$)|"chunk_gated_delta_rule_fwd_h"' \
+            -- vllm_ascend tests \
+            || true
+    )"
+
+    if [[ -n "$stale" ]]; then
+
+        echo
+        echo "[ERROR] python 侧仍引用旧算子名："
+        echo "$stale"
+
+        git reset --hard "$prev_head"
+
+        exit 1
+    fi
+
+
+    # -------------------------------------------------------------------------
+    # 生成 commit。
+    #
+    # 和 9b 一样固定 author/committer 时间与身份，
+    # 保证同一基线上重复执行得到同一个 commit SHA。
+    # 必须放在"工作树干净"校验之前，否则索引里的改动会让校验必然失败。
+    # -------------------------------------------------------------------------
+
+    echo
+    echo "[rename] 生成 commit"
+
+    GIT_AUTHOR_DATE="$VLLM_ASCEND_PR_DATE" \
+    GIT_COMMITTER_DATE="$VLLM_ASCEND_PR_DATE" \
+    GIT_COMMITTER_NAME="$VLLM_ASCEND_PR_COMMITTER_NAME" \
+    GIT_COMMITTER_EMAIL="$VLLM_ASCEND_PR_COMMITTER_EMAIL" \
+    git commit \
+        --quiet \
+        --no-verify \
+        --author="$VLLM_ASCEND_PR_AUTHOR" \
+        -m "refactor(ops): give the CANN-colliding custom ops unique symbols" \
+        -m "CANN 9.2 ships built-in ops_transformer kernels under
+opp/built-in/op_impl/ai_core/tbe/kernel/<soc>/ops_transformer/<op>_apt.
+The OPC tool compares every custom operator against the same-named built-in
+entry in the op store and fails when the ABI differs:
+
+  CausalConv1d            invalid input nums[8], should equal 12 in op store
+  ChunkGatedDeltaRuleFwdH op_info_parser crashed on a None attribute
+
+kda_gate_cumsum has the same problem and is handled by the preceding commit.
+The built-ins cannot be removed, so the custom operators get their own
+symbols instead:
+
+  moe/chunk_gated_delta_rule_fwd_h -> moe/chunk_gated_delta_rule_fwd_h_vllm
+    Mirrors upstream #17997 (identifier/case rename only). That PR also
+    switched the python path from fla_npu back to the in-tree operator; this
+    baseline predates #17727 and already calls the in-tree operator, so that
+    part does not apply and is not taken.
+
+  moe/causal_conv1d -> moe/causal_conv1d_vllm
+    Upstream #17727 deleted this operator and moved to fla_npu. This baseline
+    still uses it through torch.ops._C_ascend.npu_causal_conv1d_custom ->
+    aclnnCausalConv1d, so only the CANN operator type and the ACLNN symbols
+    are renamed; the Torch entry point and all python callers stay unchanged.
+
+No computation logic is touched. This commit is generated by
+afd_build_and_compile.sh with a fixed commit date and committer so its SHA is
+stable and the build stamp cache keeps working."
+
+
+    # -------------------------------------------------------------------------
+    # commit 之后的校验：工作树必须干净。
+    # 后面的 afd-plugin 安装校验依赖这一点。
+    # -------------------------------------------------------------------------
+
+    if [[ -n "$(
+        git status --porcelain
+    )" ]]; then
+
+        echo
+        echo "[ERROR] 改名后工作树不干净："
+
+        git status --short
+
+        git reset --hard "$prev_head"
+
+        exit 1
+    fi
+
+
+    echo
+    echo "[rename] 完成，HEAD:"
+
+    git log \
+        --oneline \
+        -1
+
+    echo
+}
+
+
+# =============================================================================
 # 10. Clone afd-plugin
 #
 # afd-plugin：
@@ -1416,6 +1895,8 @@ clone_vllm_ascend
 
 apply_vllm_ascend_pr_17998
 
+apply_vllm_ascend_op_renames
+
 clone_afd_plugin
 
 
@@ -1440,6 +1921,7 @@ echo
 echo "[vllm-ascend]"
 echo "  base commit : $VLLM_ASCEND_COMMIT"
 echo "  cherry-pick : PR #$VLLM_ASCEND_PR_NUMBER"
+echo "  renames     : chunk_gated_delta_rule_fwd_h / causal_conv1d"
 git -C "$ROOT/vllm-ascend" log \
     --oneline \
     -1
@@ -1704,6 +2186,7 @@ if need_build \
     echo "[vllm-ascend] Building..."
     echo "[vllm-ascend] base commit=$VLLM_ASCEND_COMMIT"
     echo "[vllm-ascend] cherry-pick=PR #$VLLM_ASCEND_PR_NUMBER"
+    echo "[vllm-ascend] renames=chunk_gated_delta_rule_fwd_h / causal_conv1d"
     echo "[vllm-ascend] SOC_VERSION=$SOC_VERSION"
     echo
 
@@ -1887,7 +2370,7 @@ git -C "$ROOT/vllm-ascend" \
     rev-parse \
     --short HEAD
 
-echo "                   (base $VLLM_ASCEND_COMMIT + PR #$VLLM_ASCEND_PR_NUMBER)"
+echo "                   (base $VLLM_ASCEND_COMMIT + PR #$VLLM_ASCEND_PR_NUMBER + 2 个改名)"
 
 
 printf "%-18s " "afd-plugin:"
@@ -2079,6 +2562,8 @@ echo "    base commit = $VLLM_ASCEND_COMMIT"
 echo "    cherry-pick = PR #$VLLM_ASCEND_PR_NUMBER"
 echo "                  $VLLM_ASCEND_PR_COMMIT"
 echo "                  (kda_gate_cumsum -> kda_gate_cumsum_vllm)"
+echo "    renames     = chunk_gated_delta_rule_fwd_h -> chunk_gated_delta_rule_fwd_h_vllm"
+echo "                  causal_conv1d -> causal_conv1d_vllm"
 
 
 echo

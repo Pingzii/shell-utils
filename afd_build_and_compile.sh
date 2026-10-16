@@ -15,6 +15,15 @@
 # !!! 只有确认当前容器已经完整构建成功后，后续执行才可以不加 --force。       !!!
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #
+# 构建失败先看同目录的排查文档：
+#
+#   vllm_ascend_build_troubleshooting.md
+#
+# 里面写清了两类最常见失败的判定与修复：
+#   1. 与 CANN 9.2 内置算子撞名（报 "in op store" / "'NoneType' object is not subscriptable"）
+#   2. 算子改名后 csrc/build 残留（报 "not any obj compile success"）
+#
+#
 # 前提：
 #   1. 已经进入 Docker 容器
 #   2. proxy 已经在进入容器时自动 source
